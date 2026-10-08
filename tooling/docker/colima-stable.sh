@@ -15,12 +15,13 @@
 #   status      show profile, containers, health and disk locations
 #   logs [-f]   show app logs; -f follows
 #   backup      pg_dump plus a tarball of uploads into $DATA_DIR/backups
-#   update      backup, pull the newest image for the v6 tag, then up
+#   update      backup, pull the newest image for the current app image, then up
 #   help        show usage
 #
 # Environment:
 #   RR_PORT     host port on 127.0.0.1 (default 3000; pnpm dev also uses 3000)
-#   RR_IMAGE    app image (default ghcr.io/reactive-resume/reactive-resume:v6)
+#   RR_IMAGE    app image. Once set, it is remembered in $DATA_DIR/app-image, so later
+#               commands keep it. Without it or a stamp, the stable v6 tag is used.
 #
 # Requires: colima, docker (with a Compose plugin), openssl, curl, lsof, and Homebrew's
 # docker-compose (brew install docker-compose) unless another Compose plugin is installed.
@@ -31,9 +32,12 @@ set -euo pipefail
 
 readonly SSD_ROOT="/Volumes/Mac SSD"
 readonly DATA_DIR="$SSD_ROOT/reactive-resume"
+readonly APP_IMAGE_STAMP="$DATA_DIR/app-image"
 readonly PROFILE="reactive-resume"
 readonly PROJECT="reactive-resume-stable"
-readonly APP_IMAGE="${RR_IMAGE:-ghcr.io/reactive-resume/reactive-resume:v6}"
+readonly DEFAULT_APP_IMAGE="ghcr.io/reactive-resume/reactive-resume:v6"
+# Set in main(): see resolve_app_image.
+APP_IMAGE=""
 readonly POSTGRES_IMAGE="postgres:18"
 readonly RR_PORT="${RR_PORT:-3000}"
 readonly VM_CPUS=4
@@ -64,12 +68,12 @@ Commands:
   status      show profile, containers, health and disk locations
   logs [-f]   show app logs; -f follows
   backup      pg_dump plus a tarball of uploads into $DATA_DIR/backups
-  update      backup, pull the newest image for the v6 tag, then up
+  update      backup, pull the newest image for the current app image, then up
   help        show this text
 
 Environment:
   RR_PORT     host port on 127.0.0.1 (default 3000)
-  RR_IMAGE    app image (default $APP_IMAGE)
+  RR_IMAGE    app image; remembered in $APP_IMAGE_STAMP (default $DEFAULT_APP_IMAGE)
 EOF
 }
 
@@ -249,6 +253,22 @@ write_postgres_stamp() {
   printf '%s\n' "$POSTGRES_IMAGE" > "$DATA_DIR/postgres-image"
 }
 
+# RR_IMAGE, then the image the stack last started with, then the stable v6 tag. Without the stamp, a plain
+# "up" after a nightly run would move the stack back to v6 and bring back bugs fixed since then.
+resolve_app_image() {
+  if [ -n "${RR_IMAGE:-}" ]; then
+    printf '%s\n' "$RR_IMAGE"
+  elif [ -f "$APP_IMAGE_STAMP" ]; then
+    cat "$APP_IMAGE_STAMP"
+  else
+    printf '%s\n' "$DEFAULT_APP_IMAGE"
+  fi
+}
+
+write_app_image_stamp() {
+  printf '%s\n' "$APP_IMAGE" > "$APP_IMAGE_STAMP"
+}
+
 write_compose_file() {
   local tmp="$DATA_DIR/compose.yml.tmp"
   cat > "$tmp" <<EOF
@@ -389,7 +409,7 @@ Reactive Resume is running: http://localhost:$RR_PORT
   Backups    $DATA_DIR/backups   (make one with: $0 backup)
   Database   Docker volume ${PROJECT}_postgres_data on the Colima VM disk:
              $vm_disk
-  Email      verification links go to the log until SMTP is set: $0 logs | grep verify-email
+  Email      verification links go to the log until SMTP is set: $0 logs | grep -i verify
 EOF
 }
 
@@ -421,6 +441,7 @@ cmd_up() {
   check_port_free
   start_stack
   write_postgres_stamp
+  write_app_image_stamp
   verify_stack
   print_summary
 }
@@ -449,6 +470,7 @@ cmd_stop() {
 
 cmd_status() {
   require_commands
+  log "app image: $APP_IMAGE"
   if ! profile_running; then
     log "Colima profile $PROFILE: stopped (start with: $0 up)"
     return 0
@@ -509,6 +531,8 @@ cmd_update() {
 
 main() {
   local command="${1:-up}"
+  APP_IMAGE="$(resolve_app_image)"
+  [ -n "$APP_IMAGE" ] || die "$APP_IMAGE_STAMP is empty; set RR_IMAGE or delete the file"
   if [ "$#" -gt 2 ] || { [ "$#" -eq 2 ] && [ "$command" != "logs" ]; }; then
     usage >&2
     exit 2
